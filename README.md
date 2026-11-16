@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/34917205/README.md)
 # dsh-prompt-frame
 
 [中文](#中文) · [English](#english)
