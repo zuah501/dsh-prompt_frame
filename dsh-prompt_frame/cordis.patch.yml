@@ -1,0 +1,8 @@
+# dsh-prompt-frame bundle layer: 一个 entry，行为全在 lib/index.js
+#
+# 必须是 insert 形式：写 `- id: dsh-prompt-frame` 是「改已有 entry」，
+# rc.3 找不到同名 entry 只会 warn 然后跳过（2026-10-24 实测踩过）。
+# 参考 dsh-academy/cordis.patch.yml。
+- insert:
+    - id: dsh-prompt-frame
+      name: dsh-prompt-frame

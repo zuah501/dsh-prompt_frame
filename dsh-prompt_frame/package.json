@@ -1,0 +1,62 @@
+{
+  "name": "dsh-prompt-frame",
+  "version": "0.1.0",
+  "description": "Lightweight context management for AI agents: layered prompt injection gives every DSH workspace its own identity, rules and persistent memory",
+  "type": "module",
+  "license": "MIT",
+  "author": "zuah501",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zuah501/dsh-prompt_frame.git"
+  },
+  "homepage": "https://github.com/zuah501/dsh-prompt_frame#readme",
+  "bugs": {
+    "url": "https://github.com/zuah501/dsh-prompt_frame/issues"
+  },
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "vendor",
+    "assets",
+    "cordis.patch.yml",
+    "README.md",
+    "NOTICE",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": ">=3.18.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "context-management",
+    "prompt-injection",
+    "workspace-isolation",
+    "agent-memory",
+    "ai-agent"
+  ]
+}

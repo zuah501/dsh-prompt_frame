@@ -1,0 +1,60 @@
+dsh-prompt-frame
+================
+Copyright (c) 2026 zuah501
+
+This product includes software developed by YuJunZhiXue/dsh-purge
+(https://github.com/YuJunZhiXue/dsh-purge), release v1.1.77, licensed under the
+Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
+
+Files copied verbatim from dsh-purge v1.1.77 (lib/ of the upstream package):
+
+  vendor/capability-protocol.js   3,268 B  byte-for-byte copy.
+                                            Exports CAPABILITY_SECTION and
+                                            capabilityProtocolText(); no imports.
+
+  vendor/phase1-keep.js             904 B  byte-for-byte copy.
+                                            Exports PHASE1_KEEP_EXPR and
+                                            widenPhase1KeepFilter(); no imports.
+
+  vendor/identity.js             41,755 B  copy with two local edits:
+                                            line 1
+                                              - import { ownServerNote } from "./net-scope.js";
+                                              + import { ownServerNote } from "./net-scope-lite.js";
+                                            and the string literal assigned to
+                                            OLD_PERSONA_LOCK (a legacy marker used
+                                            only to strip a persona block emitted
+                                            by older builds of this plugin) was
+                                            rewritten to product-neutral wording.
+                                            Everything else is unchanged, including
+                                            the remaining two relative imports
+                                            (./capability-protocol.js, ./phase1-keep.js),
+                                            which resolve to the copies above.
+                                            Upstream md5 dcbbbdd86d7c6288796484c7909ee3e5;
+                                            vendored md5 b857cdabd79b2d9654f3034b384f90a3.
+
+  vendor/net-scope-lite.js                 NOT an upstream file. Written for this
+                                            package. It reproduces two functions:
+                                              - ownServerNote()  verbatim from
+                                                upstream lib/net-scope.js:466
+                                                (three lines, body is `return "";`)
+                                              - findDshHome()    reduced form of
+                                                upstream lib/core.js:1680: DSH_HOME
+                                                first, then ~/.dsh. The upstream
+                                                version additionally probes the
+                                                desktop surface (surface.js,
+                                                desktop.js, npm prefix, WSL); that
+                                                machinery is out of scope here.
+                                            The Apache-2.0 notice applies to the
+                                            reproduced function bodies.
+
+  assets/frame.md                          NOT from dsh-purge, and contains no
+                                            third-party material. It is a blank
+                                            template written for this release.
+
+Why vendor instead of depending on dsh-purge: the earlier experimental plugin
+imported dsh-purge/lib/identity.js by absolute path, so uninstalling dsh-purge
+broke it. Vendoring the three files removes that dependency; nothing here reads
+dsh-purge at runtime.
+
+Apache License 2.0 full text: http://www.apache.org/licenses/LICENSE-2.0
+Upstream repository:          https://github.com/YuJunZhiXue/dsh-purge
