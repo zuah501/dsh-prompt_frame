@@ -1,2 +1,3 @@
 # dsh-prompt_frame
-把 DeepSeek Harness（DSH）每轮的 system prompt 装配结果整段替换成一份可配置的注入框架。 
+轻量化 AI Agent 上下文管理插件：分层提示词注入，为每个工作区提供独立的身份定位、规则约束与持续记忆。
+
