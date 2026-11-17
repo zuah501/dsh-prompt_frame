@@ -1,0 +1,4 @@
+# 行尾：仓库内一律 LF；Windows 批处理在检出时转 CRLF
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf

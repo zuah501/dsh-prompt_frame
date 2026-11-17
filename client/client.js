@@ -21,11 +21,11 @@ window.__ModuleLoader__.load({
     var exports = module.exports;
     Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 
-    // 自证探针（1.4.4 排查用，保留无副作用）：宿主若真的把本 bundle 塞进页面，
+    // 自证探针（排查用，保留无副作用）：宿主若真的把本 bundle 塞进页面，
     // DevTools Console 会出现这条日志、window 上会出现这个标记。
     // 看不到 = 宿主根本没加载 client 半（与注入本身无关，注入在 host 进程里跑）。
     try {
-      window.__dshPromptFrameClient = { loadedAt: new Date().toISOString(), rev: "1.4.4" };
+      window.__dshPromptFrameClient = { loadedAt: new Date().toISOString(), rev: "1.0.0" };
       console.log("[dsh-prompt-frame] client bundle loaded");
     } catch {
       /* 无 window 环境（离线测试）忽略 */
@@ -33,6 +33,34 @@ window.__ModuleLoader__.load({
 
     const react = require("react");
     const h = react.createElement;
+    // react-dom 只在宿主模块表里有它时才拿得到；没有就退化成原位渲染（同 dsh-undo-savepoint 的降级做法）。
+    let reactDom = null;
+    try {
+      reactDom = require("react-dom");
+    } catch (err) {
+      reactDom = null;
+    }
+    /**
+     * 浮层挂到 document.body。
+     * 会话头部容器常带 overflow:hidden / transform / backdrop-filter，三者任一都会把 fixed 子元素
+     * 裁进那个包含块里 —— 于是"点开了但什么都看不见"，caret 却已经翻转。portal 是唯一干净的解法。
+     */
+    const portalTo = (node) => {
+      if (
+        node
+        && reactDom
+        && typeof reactDom.createPortal === "function"
+        && typeof document !== "undefined"
+        && document.body
+      ) {
+        try {
+          return reactDom.createPortal(node, document.body);
+        } catch (err) {
+          /* 降级为原位渲染 */
+        }
+      }
+      return node;
+    };
     const { useCallback, useEffect, useMemo, useState } = react;
 
     const API = "/api/prompt-frame";
@@ -69,6 +97,18 @@ window.__ModuleLoader__.load({
       "no-inject-text": "无注入正文",
       error: "出错回退",
       unknown: "未知",
+    };
+
+    // 当前生效的两级正文名（v2）：第一层 -- 第二层。
+    // append 时两层都进 prompt，用 " -- "；replace 时第二层顶掉第一层，用 " → " 更醒目。
+    // 只用来显示，不参与任何判定——判定在后端 composeInjectText 里。
+    const labelOfProfile = (name) => (!name || name === "default" ? "默认" : name);
+    const layerNameOf = (st) => {
+      const d = (st && st.lastDecision) || {};
+      const l1 = labelOfProfile(d.l1 || (st && st.profile));
+      const l2 = d.l2 ? labelOfProfile(d.l2) : "";
+      if (!l2) return l1;
+      return (d.mode === "replace" ? l1 + " → " + l2 : l1 + " -- " + l2);
     };
 
     // 主题 token 全部取自宿主 --dsw-alias-*，深浅色自动跟随。
@@ -128,18 +168,32 @@ window.__ModuleLoader__.load({
               : "var(--dsw-alias-label-tertiary, #b8b8b8)",
         flex: "0 0 auto",
       }),
-      // 状态灯语义（1.4.1）：绿灯只代表"全局开关开着且本工作区没被排除"。
-      // 被目录/会话排除时用琥珀色，避免"明明排除了还是绿的"这种误读。
+      // 状态灯语义（v1）：绿 = 正在注入，琥珀 = 走原生（连全局注入一起隔离），灰 = 关掉。
+      // 绿点后面跟"这一轮生效的是哪一份正文"：工作区层 replace 时是工作区名，
+      // append 时是"全局 + 工作区"，没有工作区层就是全局版本名。
       headOf: (st) => {
         if (!st) return { text: "读取中", dot: "off", dim: true };
         if (st.enabled === false) return { text: "配置已禁用", dot: "off", dim: true };
         if (st.offFlag) return { text: "已停用（OFF 标志）", dot: "off", dim: true };
+        const d = st.lastDecision || {};
         if (st.effective === false) {
-          const d = st.lastDecision || {};
-          const why = d.reason === "excluded-session" ? "本会话已排除" : "本工作区已排除";
-          return { text: why, dot: "excluded", dim: false, cwd: d.cwd || "" };
+          const why = d.reason === "excluded-session" ? "本会话已切原生" : "本工作区已切原生";
+          return { text: "原生", dot: "excluded", dim: false, cwd: d.cwd || "", why };
         }
-        if (st.effective === true) return { text: "生效中", dot: true, dim: false };
+        if (st.effective === true) {
+          return {
+            text: "注入",
+            dot: true,
+            dim: false,
+            layer: layerNameOf(st),
+            l1: labelOfProfile(d.l1 || st.profile),
+            l2: d.l2 ? labelOfProfile(d.l2) : "",
+            mode: d.mode || "append",
+            // 还没跑过一轮对话，这个判定是按宿主的工作区根预判的（不是既成事实）。
+            preview: d.preview === true,
+            cwd: d.cwd || "",
+          };
+        }
         return { text: "全局已开启（尚无装配记录）", dot: "off", dim: true };
       },
     };
@@ -409,7 +463,13 @@ window.__ModuleLoader__.load({
             { style: C.row },
             h("span", { style: C.dot(head.dot) }),
             h("strong", { style: { fontSize: "13px" } }, "注入框架"),
-            h("span", { style: C.dim }, head.text),
+            h(
+              "span",
+              { style: C.dim },
+              head.text
+              + (head.layer ? " · " + head.layer : "")
+              + (head.preview ? "（预判）" : ""),
+            ),
           ),
           h(
             "div",
@@ -591,39 +651,284 @@ window.__ModuleLoader__.load({
       return h("div", { style: C.card, "data-dsh-prompt-frame": "panel" }, children);
     }
 
-    // ── 会话头部徽章 ─────────────────────────────────────────────────
+    // ── 会话头部徽章：绿点 + 两级正文名；点开是浮窗，不直接改配置 ──
+    // 为什么是浮窗：徽章只知道 cwd，不知道命中的是哪条规则；单击直接翻转等于
+    // 一次点击改掉整个工作区，误触代价太大。浮窗里摆明「这个目录的第一层/第二层」
+    // 与「整目录切原生」，改与不改都看得见。会话级切换仍在设置页的「生效范围」。
     function HeaderBadge() {
-      const { status } = useFrameStatus();
+      const { status, load } = useFrameStatus();
+      // 所有 hook 必须在下面那个 early return 之前：晚出生一个 hook 会让整个组件
+      // 在 gov 从 null 变有值的那次渲染里报 "Rendered more hooks than during the
+      // previous render"，设置页会整块空白。
+      const [open, setOpen] = useState(false);
+      const [gov, setGov] = useState(null);
+      const [draft, setDraft] = useState({ l1: "", l2: "", mode: "append" });
+      const [busy, setBusy] = useState(false);
+      const [msg, setMsg] = useState("");
+      const [box, setBox] = useState(null);
       if (!status || !status.state) return null;
       const head = C.headOf(status.state);
       const excluded = head.dot === "excluded";
+      const cwd = head.cwd || "";
+      const st = gov && gov.state ? gov.state : null;
+      const allProfiles = (gov && gov.profiles) || [];
+      const l1List = allProfiles.filter((p) => p.level !== "l2");
+      const l2List = allProfiles.filter((p) => p.level === "l2");
+      const active = (st && st.profile) || status.state.profile || "";
+      const hitPath = (status.state.lastDecision && status.state.lastDecision.rule) || "";
+      const rule = ((st && st.workspaces) || []).find((w) => w.path === hitPath) || null;
+      const targetPath = (rule && rule.path) || hitPath || cwd;
+      // 打开浮窗时才拉 /state（profiles + workspaces 都在里面），平时只轮询 /status。
+      const togglePanel = async (ev) => {
+        const next = !open;
+        setOpen(next);
+        setMsg("");
+        if (!next) return;
+        // 浮窗用 fixed 定位：会话头部容器通常带 overflow:hidden，absolute 落下就被裁掉，
+        // 视觉上等于"点了没反应"。这里按徽章的实际位置算一个视口坐标。
+        try {
+          const r = ev && ev.currentTarget && ev.currentTarget.getBoundingClientRect
+            ? ev.currentTarget.getBoundingClientRect()
+            : null;
+          if (r) setBox({ top: Math.round(r.bottom + 6), right: Math.round(Math.max(8, window.innerWidth - r.right)) });
+        } catch {
+          setBox(null);
+        }
+        try {
+          const g = await getJson(API + "/state");
+          setGov(g);
+          const hp = (g && g.state && g.state.lastDecision && g.state.lastDecision.rule) || "";
+          const r = ((g && g.state && g.state.workspaces) || []).find((w) => w.path === hp) || null;
+          setDraft({ l1: (r && r.l1) || "", l2: (r && r.l2) || "", mode: (r && r.mode) || "append" });
+        } catch (e) {
+          setMsg("读取失败：" + ((e && e.message) || String(e)));
+        }
+      };
+      const saveRule = async () => {
+        if (!targetPath) { setMsg("没有可写的工作目录"); return; }
+        setBusy(true);
+        setMsg("⏳ 保存中…");
+        try {
+          await getJson(API + "/state", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              action: "path-set",
+              path: targetPath,
+              l1: draft.l1 || active,
+              l2: draft.l2,
+              mode: draft.l2 ? draft.mode : "append",
+            }),
+          });
+          setMsg("✅ 已保存，下一轮生效");
+          await load();
+          setGov(await getJson(API + "/state"));
+        } catch (e) {
+          setMsg("❌ 失败：" + ((e && e.message) || String(e)));
+        } finally {
+          setBusy(false);
+        }
+      };
+      const pbtn = (label, onClick) =>
+        h(
+          "span",
+          {
+            key: label,
+            onClick: busy ? undefined : onClick,
+            style: busy ? Object.assign({}, C.btn, { opacity: 0.5, cursor: "default" }) : C.btn,
+          },
+          label,
+        );
+      const prow = { display: "flex", alignItems: "center", gap: "6px", margin: "6px 0", fontSize: "12px" };
+      const psel = { height: "22px", fontSize: "12px", maxWidth: "156px" };
+      // 深色模式下原生 option 会继承白字叠浅底而看不见，这里显式钉死对比色。
+      // 不能在徽章里复用 FrameGovernance 的 optCss —— 那个是函数内局部变量。
+      const pOpt = { color: "#1a1a1a", background: "#ffffff" };
+      const flip = async () => {
+        if (!cwd) return;
+        setBusy(true);
+        setMsg("⏳ 提交中…");
+        try {
+          await getJson(API + "/state", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ action: excluded ? "path-remove" : "path-add", path: cwd }),
+          });
+          setMsg(excluded ? "✅ 已恢复注入" : "✅ 这个目录已切原生");
+          await load();
+          setGov(await getJson(API + "/state"));
+        } catch (e) {
+          setMsg("❌ 失败：" + ((e && e.message) || String(e)));
+        } finally {
+          setBusy(false);
+        }
+      };
       const title =
         "注入框架：" + head.text
-        + (head.cwd ? " · " + head.cwd : "")
-        + (status.inject ? " · 正文 " + fmtKB(status.inject.bytes) : "")
-        + (excluded ? "（该目录/会话在排除表里，走原生 prompt）" : "");
-      return h(
-        "span",
-        {
-          title,
-          style: {
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "4px",
-            fontSize: "11px",
-            height: "20px",
-            padding: "0 7px",
-            borderRadius: "999px",
-            border: "1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.35))",
-            color: "var(--dsw-alias-label-secondary, inherit)",
-            cursor: "default",
-            whiteSpace: "nowrap",
-            flex: "none",
+        + (head.layer ? " · 生效正文 " + head.layer : "")
+        + (head.l1 ? "\n第一层 " + head.l1 + (head.l2 ? "\n第二层 " + head.l2 + (head.mode === "replace" ? "（替换第一层）" : "（叠加在第一层之后）") : "（无第二层）") : "")
+        + (head.preview ? "\n（预判：本进程还没跑过对话，按工作区根估算）" : "")
+        + (head.why ? " · " + head.why : "")
+        + (head.cwd ? "\n当前目录 " + head.cwd : "")
+        + (status.inject ? "\n正文 " + fmtKB(status.inject.bytes) : "")
+        + (cwd ? "\n点开浮窗：改两级 / 切原生" : "");
+      const panelBody = open
+        ? h(
+            "div",
+            {
+              style: {
+                position: "fixed",
+                top: (box && box.top ? box.top : 64) + "px",
+                right: (box && box.right !== undefined && box.right !== null ? box.right : 16) + "px",
+                zIndex: 10000,
+                maxHeight: "70vh",
+                overflowY: "auto",
+                minWidth: "268px",
+                padding: "10px 12px",
+                borderRadius: "10px",
+                border: "1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.35))",
+                background: "var(--dsw-alias-bg-base, #ffffff)",
+                color: "var(--dsw-alias-label-primary, inherit)",
+                boxShadow: "0 6px 20px rgba(0,0,0,.18)",
+                textAlign: "left",
+                whiteSpace: "normal",
+                cursor: "default",
+              },
+              onClick: (ev) => ev.stopPropagation(),
+            },
+            [
+              h(
+                "div",
+                { key: "top", style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" } },
+                [
+                  h("strong", { key: "t", style: { fontSize: "12px" } }, excluded ? "本工作区：原生" : "本工作区：注入"),
+                  pbtn("关闭", () => setOpen(false)),
+                ],
+              ),
+              h(
+                "div",
+                { key: "path", style: Object.assign({}, C.dim, { fontSize: "11px", margin: "4px 0 8px", wordBreak: "break-all" }) },
+                tailPath(targetPath || cwd || "（未知目录）"),
+              ),
+              h("div", { key: "l1", style: prow }, [
+                h("span", { key: "k", style: { width: "42px" } }, "第一层"),
+                h(
+                  "select",
+                  {
+                    key: "v",
+                    value: draft.l1,
+                    onChange: (ev) => setDraft(Object.assign({}, draft, { l1: ev.target.value })),
+                    style: psel,
+                  },
+                  [h("option", { key: "__follow", value: "", style: pOpt }, "跟随全局（" + labelOfProfile(active) + "）")].concat(
+                    l1List.map((p) => h("option", { key: p.name, value: p.name, style: pOpt }, p.name)),
+                  ),
+                ),
+              ]),
+              h("div", { key: "l2", style: prow }, [
+                h("span", { key: "k", style: { width: "42px" } }, "第二层"),
+                h(
+                  "select",
+                  {
+                    key: "v",
+                    value: draft.l2,
+                    onChange: (ev) => setDraft(Object.assign({}, draft, { l2: ev.target.value })),
+                    style: psel,
+                  },
+                  [h("option", { key: "__none", value: "", style: pOpt }, "无")]
+                    .concat(
+                      draft.l2 && !l2List.some((p) => p.name === draft.l2)
+                        ? [h("option", { key: "__missing", value: draft.l2, style: pOpt }, draft.l2 + "（缺正文 · 这一级会被跳过）")]
+                        : [],
+                    )
+                    .concat(l2List.map((p) => h("option", { key: p.name, value: p.name, style: pOpt }, p.name))),
+                ),
+              ]),
+              h("div", { key: "mode", style: prow }, [
+                h("span", { key: "k", style: { width: "42px" } }, "方式"),
+                h(
+                  "select",
+                  {
+                    key: "v",
+                    value: draft.mode,
+                    onChange: (ev) => setDraft(Object.assign({}, draft, { mode: ev.target.value })),
+                    style: psel,
+                    disabled: !draft.l2,
+                  },
+                  [
+                    h("option", { key: "append", value: "append", style: pOpt }, "叠加在第一层之后"),
+                    h("option", { key: "replace", value: "replace", style: pOpt }, "替换第一层"),
+                  ],
+                ),
+              ]),
+              h("div", { key: "ops", style: { display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, [
+                pbtn("保存这两级", saveRule),
+                pbtn(excluded ? "恢复注入" : "整目录走原生", flip),
+              ]),
+              msg
+                ? h("div", { key: "msg", style: Object.assign({}, C.dim, { fontSize: "11px", marginTop: "6px" }) }, msg)
+                : null,
+            ],
+          )
+        : null;
+      // 透明全屏遮罩：点空白处关掉浮窗，同时保证浮窗不在任何裁剪容器里。
+      const panel = panelBody
+        ? portalTo(
+            h(
+              "div",
+              {
+                key: "scrim",
+                onClick: () => setOpen(false),
+                style: {
+                  position: "fixed",
+                  left: 0,
+                  top: 0,
+                  right: 0,
+                  bottom: 0,
+                  zIndex: 9998,
+                  background: "transparent",
+                },
+              },
+              panelBody,
+            ),
+          )
+        : null;
+      return h("span", { style: { position: "relative", display: "inline-flex", flex: "none" } }, [
+        h(
+          "span",
+          {
+            key: "badge",
+            title,
+            onClick: (ev) => togglePanel(ev),
+            style: {
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "4px",
+              fontSize: "11px",
+              height: "20px",
+              padding: "0 7px",
+              borderRadius: "999px",
+              border: "1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.35))",
+              color: "var(--dsw-alias-label-secondary, inherit)",
+              cursor: cwd ? "pointer" : "default",
+              whiteSpace: "nowrap",
+              flex: "none",
+              maxWidth: "300px",
+              userSelect: "none",
+            },
           },
-        },
-        h("span", { style: C.dot(head.dot) }),
-        h("span", null, excluded ? "原生" : "注入"),
-      );
+          [
+            h("span", { key: "dot", style: C.dot(head.dot) }),
+            h(
+              "span",
+              { key: "txt", style: { overflow: "hidden", textOverflow: "ellipsis", maxWidth: "270px" } },
+              excluded ? "原生" : "注入" + (head.layer ? " · " + head.layer : ""),
+            ),
+            h("span", { key: "caret", style: { fontSize: "9px", opacity: 0.6 } }, open ? "▴" : "▾"),
+          ],
+        ),
+        panel,
+      ]);
     }
 
     // ── 设置页：版本管理 + 按会话注入范围 ───────────────────────────
@@ -631,7 +936,7 @@ window.__ModuleLoader__.load({
     // settings.frame.item 放正文。两级都失败时整页跳过，插件页卡片不受影响。
     // 这里改的是"运行时状态"（~/.dsh/dsh-prompt-frame-state.json），下一轮
     // 装配立即生效，不需要重启，也不动 settings.json。
-    // 1.4.0：取消「全部 / 黑名单 / 白名单」三态。默认对所有会话注入，页面只维护两张
+    // 取消「全部 / 黑名单 / 白名单」三态。默认对所有会话注入，页面只维护两张
     // "不注入"的表：工作目录（跨对话稳定，主用旋钮）与会话 id（临时精确排除）。
     // 这样新开对话、切换工作区都自动继承默认，不需要重新登记；也不会出现
     // "选了全部，下面名单还有内容"这种没有语义的歧义。
@@ -677,22 +982,45 @@ window.__ModuleLoader__.load({
       const [newName, setNewName] = useState("");
       const [sidInput, setSidInput] = useState("");
       const [pathInput, setPathInput] = useState("");
+      // 工作区规则（两级）表单：路径 + 第一级预设 + 第二级预设 + 方式（正文在两级各自的页面里写）
+      const [wpPath, setWpPath] = useState("");
+      const [wpL1, setWpL1] = useState("");
+      const [wpL2, setWpL2] = useState("");
+      const [wpMode, setWpMode] = useState("append");
+      // 页面导航：home = 概览（工作区隔离 + 对话隔离默认展开）；l1 = 第一层全局正文；l2 = 第二层工作区正文
+      const [page, setPage] = useState("home");
+      // 第一层正文编辑器：l1Name = 正在编辑的预设，l1Text = 草稿，l1Loaded = 已加载的预设名
+      const [l1Name, setL1Name] = useState("");
+      const [l1Text, setL1Text] = useState("");
+      const [l1Loaded, setL1Loaded] = useState("");
+      // 第二层正文编辑器：选中的工作区规则目录 + 草稿
+      const [l2Path, setL2Path] = useState("");
+      const [l2Text, setL2Text] = useState("");
+      // 第二层页：直接为某目录绑定/新建第二级（不用先回概览）
+      const [l2NewPath, setL2NewPath] = useState("");
+      const [l2Pick, setL2Pick] = useState("");
+      const [l2Mode, setL2Mode] = useState("append");
+      // 第一层页：新建空白预设的名字
+      const [blankName, setBlankName] = useState("");
+      // 概览里的规则列表默认展开（折叠时整页看着是空的），仍可手动折叠
+      const [wsOpen, setWsOpen] = useState(true);
 
       const post = useCallback(
         async (url, body, okMsg) => {
+          const t0 = Date.now();
           setBusy(String(url) + JSON.stringify(body));
-          setMsg("");
+          setMsg("⏳ " + (okMsg || "提交中") + " …");
           try {
             const r = await getJson(url, {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify(body),
             });
-            setMsg(okMsg || "完成");
+            setMsg("✅ " + (okMsg || "完成") + " · " + (Date.now() - t0) + " ms · " + new Date().toLocaleTimeString());
             await load();
             return r;
           } catch (e) {
-            setMsg("失败：" + String((e && e.message) || e));
+            setMsg("❌ 失败：" + String((e && e.message) || e) + " · " + new Date().toLocaleTimeString());
             return null;
           } finally {
             setBusy("");
@@ -712,6 +1040,8 @@ window.__ModuleLoader__.load({
       const st = gov.state || {};
       const profiles = gov.profiles || [];
       const active = st.activeProfile || "default";
+      // 默认第二层：没有任何工作区规则命中时，全对话都用这份第二层正文
+      const defaultL2 = st.defaultL2 || "";
       const exPaths = st.excludePaths || [];
       const exSessions = st.excludeSessions || [];
       const recent = gov.recentSessions || [];
@@ -719,6 +1049,10 @@ window.__ModuleLoader__.load({
       const lastCwd = st.lastCwd || gov.lastCwd || null;
       const activeInfo = profiles.find((p) => p.name === active) || {};
       const rt = gov.runtime || {};
+      // 预设按层分开：第一层页只列 l1，第二层页只列 l2（未标层的旧预设按 l1 算），
+      // 免得把全局正文选到工作区层上去——两层混用等于把全局正文再叠一遍。
+      const l1Profiles = profiles.filter((p) => p.level !== "l2");
+      const l2Profiles = profiles.filter((p) => p.level === "l2");
 
       const label = (txt) => h("span", { style: { minWidth: "76px", color: "var(--dsw-alias-label-secondary, inherit)" } }, txt);
       const line = (txt, node, hint) =>
@@ -728,43 +1062,46 @@ window.__ModuleLoader__.load({
           hint ? h("span", { style: Object.assign({}, C.dim, { fontSize: "11px" }) }, hint) : null,
         ]);
 
-      // —— 版本表 ——
-      const profileRows = profiles.map((p) =>
-        h("tr", { key: p.name }, [
-          h("td", { style: C.td }, [
-            h("span", { style: C.dot(p.name === active) }),
-            " ",
-            p.name === active ? h("strong", null, p.name) : p.name,
+      // —— 预设表：调用方传过滤后的列表（第一层页传 l1Profiles，第二层页传 l2Profiles）——
+      // —— 预设表：调用方传过滤后的列表（第一层传 l1Profiles，第二层传 l2Profiles）——
+      // kind 决定操作列语义：第一层是「设为全局生效」，第二层是「设为默认」——
+      // 默认第二层会被所有没有单独配规则的对话使用。
+      const profileRowsFor = (list, kind) =>
+        list.map((p) =>
+          h("tr", { key: p.path || p.name }, [
+            h("td", { style: C.td }, [
+              h("span", { style: C.dot(kind === "l2" ? p.name === defaultL2 : p.name === active) }),
+              " ",
+              kind === "l2" && p.name === defaultL2 ? h("strong", null, p.name + "（默认第二层）") : p.name,
+            ]),
+            h("td", { style: C.td }, kb(p.bytes)),
+            h("td", { style: C.td }, [
+              kind === "l2"
+                ? p.name === defaultL2
+                  ? h("span", { style: Object.assign({}, C.dim, { fontSize: "11px" }) }, "默认 · 挂到全对话")
+                  : smallBtn(
+                      "设为默认第二层",
+                      () => post(API + "/state", { action: "set-default-l2", name: p.name }, "已把 " + p.name + " 设为默认第二层"),
+                      !!busy,
+                    )
+                : p.name === active
+                  ? h("span", { style: Object.assign({}, C.dim, { fontSize: "11px" }) }, "全局生效中")
+                  : smallBtn(
+                      "设为全局生效",
+                      () => post(API + "/profiles", { action: "activate", name: p.name }, "已切到 " + p.name),
+                      !!busy,
+                    ),
+              " ",
+              p.name === "default"
+                ? h("span", { style: Object.assign({}, C.dim, { fontSize: "11px" }) }, "内置，不可删")
+                : smallBtn(
+                    "删除",
+                    () => post(API + "/profiles", { action: "delete", name: p.name, level: p.level }, "已删除 " + p.name),
+                    !!busy,
+                  ),
+            ]),
           ]),
-          h("td", { style: C.td }, kb(p.bytes)),
-          h("td", { style: C.td }, String(p.lines == null ? "-" : p.lines)),
-          h("td", { style: C.td }, [
-            p.name === active
-              ? h("span", { style: Object.assign({}, C.dim, { fontSize: "11px" }) }, "生效中")
-              : h(
-                  "button",
-                  {
-                    style: btnStyle(!!busy),
-                    disabled: !!busy,
-                    onClick: () => post(API + "/profiles", { action: "activate", name: p.name }, "已切到 " + p.name),
-                  },
-                  "启用",
-                ),
-            " ",
-            p.name === "default" || p.name === active
-              ? null
-              : h(
-                  "button",
-                  {
-                    style: btnStyle(!!busy),
-                    disabled: !!busy,
-                    onClick: () => post(API + "/profiles", { action: "delete", name: p.name }, "已删除 " + p.name),
-                  },
-                  "删除",
-                ),
-          ]),
-        ]),
-      );
+        );
 
       // —— 两张排除表：工作目录（主用，跨对话稳定）＋ 会话 id（备用，精确到单次对话）——
       const smallBtn = (label, onClick, disabled) =>
@@ -787,6 +1124,286 @@ window.__ModuleLoader__.load({
           )
         : [h("div", { key: "empty", style: C.dim }, "暂无排除目录 —— 所有工作区都注入")];
 
+      // —— 工作区层（v1）——
+      // 工作区规则 = 「目录 → 预设名 + 方式」。名字即预设：写正文时先建预设再落文件，
+      // 所以不需要第二个"规则库"，同一份正文可以被多个工作区共用。
+      const workspaces = st.workspaces || [];
+      const inputCss = {
+        flex: "1 1 180px",
+        minWidth: "140px",
+        height: "26px",
+        padding: "0 8px",
+        fontSize: "12px",
+        borderRadius: "6px",
+        border: "1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.35))",
+        background: "transparent",
+        color: "inherit",
+      };
+      // 原生下拉的 option 在深色主题下会继承白色文字但套系统浅色背景，整排看不见。
+      // 显式定死对比色：浅色/深色主题下都能读。
+      const optCss = { color: "#1a1a1a", background: "#ffffff" };
+      const areaCss = {
+        width: "100%",
+        boxSizing: "border-box",
+        marginTop: "6px",
+        padding: "8px",
+        fontSize: "12px",
+        lineHeight: 1.55,
+        borderRadius: "6px",
+        border: "1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.35))",
+        background: "transparent",
+        color: "inherit",
+        fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
+        resize: "vertical",
+      };
+
+      // 概览里加一条工作区规则：只选两个层级的预设，不在这里写正文。
+      const addRule = async () => {
+        const p = wpPath.trim();
+        if (!p) {
+          setMsg("❌ 工作目录不能为空");
+          return;
+        }
+        if (!wpL1 && !wpL2) {
+          setMsg("❌ 第一级和第二级至少要选一个 —— 两级都空等于没有这条规则");
+          return;
+        }
+        if ((workspaces || []).some((x) => String(x.path || "").toLowerCase() === p.toLowerCase())) {
+          setMsg("❌ 这个目录已经有规则了：直接改下面表格里的两个下拉，不用再加一条");
+          return;
+        }
+        const saved = await post(
+          API + "/state",
+          { action: "path-set", path: p, l1: wpL1, l2: wpL2, mode: wpMode },
+          "已添加 " + tailPath(p) + "：第一级 " + (wpL1 || "跟随全局") + " / 第二级 " + (wpL2 || "无"),
+        );
+        if (saved) {
+          setWpPath("");
+          setWpL1("");
+          setWpL2("");
+          setWsOpen(true);
+        }
+      };
+
+      // 单条两级规则提交：下拉一改就存，避免半截草稿停在页面上。
+      const setRule = async (w, patch) => {
+        const next = Object.assign({ l1: w.l1 || "", l2: w.l2 || "", mode: w.mode || "append" }, patch);
+        if (!next.l1 && !next.l2) {
+          setMsg("第一级和第二级至少要留一个预设 —— 两级都空等于没有这条规则");
+          return;
+        }
+        await post(
+          API + "/state",
+          { action: "path-set", path: w.path, l1: next.l1, l2: next.l2, mode: next.mode },
+          "已更新 " + tailPath(w.path) + "：L1 " + (next.l1 || "跟随全局") + " / L2 " + (next.l2 || "无"),
+        );
+      };
+      // —— 两个正文编辑页的读取 ——
+      // 第一层：编辑某个预设的正文（预设 = 一份正文文件；default 是覆盖文件，缺省回落包内模板）
+      const loadL1 = async (name) => {
+        const nm = name || active;
+        try {
+          const r = await getJson(API + "/inject?level=l1&profile=" + encodeURIComponent(nm));
+          setL1Name(nm);
+          setL1Text(r && typeof r.text === "string" ? r.text : "");
+          setL1Loaded(nm);
+          setMsg("");
+        } catch (e) {
+          setMsg("读取正文失败：" + String((e && e.message) || e));
+        }
+      };
+      // 第二层：把某个预设的正文读进编辑器（预设可能来自规则，也可能是下拉里新选的）
+      const loadL2Text = async (name) => {
+        if (!name) {
+          setL2Text("");
+          return;
+        }
+        try {
+          const r = await getJson(API + "/inject?level=l2&profile=" + encodeURIComponent(name));
+          setL2Text(r && typeof r.text === "string" ? r.text : "");
+        } catch (e) {
+          setMsg("❌ 读取正文失败：" + String((e && e.message) || e));
+        }
+      };
+      // 点「编辑」把一条规则整个带进编辑器：目录 / 预设 / 方式 / 正文
+      const openL2 = (w) => {
+        if (!w) return;
+        setL2Path(w.path);
+        setL2NewPath(w.path);
+        setL2Pick(w.l2 || "");
+        setL2Mode(w.mode === "replace" ? "replace" : "append");
+        setL2Text("");
+        setMsg("");
+        if (w.l2) loadL2Text(w.l2);
+      };
+      const pickRule = (path) => {
+        if (!path) {
+          setL2Path("");
+          return;
+        }
+        const w = (workspaces || []).find((x) => x.path === path);
+        if (w) openL2(w);
+      };
+      // 第二层页的保存：目录 → 预设的绑定与正文一次做完（不用先回概览建规则）
+      const saveL2 = async () => {
+        const dir = String(l2NewPath || l2Path || "").trim();
+        if (!dir) {
+          setMsg("❌ 先填工作目录，例如 E:/dsh测试");
+          return;
+        }
+        if (!l2Pick) {
+          setMsg("❌ 先选一个第二级预设；没有的话在右边输入名字点「新建」");
+          return;
+        }
+        const r = await post(
+          API + "/state",
+          { action: "path-set", path: dir, l1: "", l2: l2Pick, mode: l2Mode },
+          "已绑定 " + tailPath(dir) + " → " + l2Pick + "（" + (l2Mode === "replace" ? "替换" : "叠加") + "）",
+        );
+        if (!r) return;
+        setL2Path(dir);
+        if (l2Text.trim()) await post(API + "/inject", { profile: l2Pick, text: l2Text, level: "l2" }, "已保存第二层正文 " + l2Pick);
+      };
+      // 切页：带上可选目标（预设名 / 规则目录），没带就沿用上次的
+      const goPage = (p, arg) => {
+        setPage(p);
+        // 只在"还没加载过正文"时自动拉一次：反复切页不能覆盖正在编辑、还没保存的草稿。
+        if (p === "l1") {
+          const target = typeof arg === "string" && arg ? arg : "";
+          if (target && target !== l1Loaded) loadL1(target);
+          else if (!l1Loaded) loadL1(active);
+        }
+        // 进第二层页时如果还没选预设，自动落到第一份并把正文读进来，
+        // 否则下拉一直挂着占位项、编辑框也是空的。（这段必须在普通函数里做：
+        // 组件体里 gov 为 null 时会提前 return，那里再多一个 hook 会让 React 抛
+        // "Rendered more hooks than during the previous render"，整块设置页变空白。）
+        if (p === "l2") {
+          const target = typeof arg === "string" && arg ? arg : "";
+          if (target) pickRule(target);
+          else if (!l2Pick && l2Profiles.length > 0) {
+            setL2Pick(l2Profiles[0].name);
+            loadL2Text(l2Profiles[0].name);
+          }
+        }
+      };
+
+      // —— 工作区规则表：一行一套配置，点单元格里的下拉即时换，拖动手柄换顺序 ——
+      const selCss = Object.assign({}, inputCss, { minWidth: "110px", height: "24px" });
+      const dim11 = Object.assign({}, C.dim, { fontSize: "11px" });
+      // 下拉选项：本层预设 + 这一行已经在用的那个（防层级标记不一致时把现配置"显示成空"）
+      const optsFor = (list, cur) => {
+        if (!cur) return list;
+        return list.some((p) => p.name === cur) ? list : list.concat([{ name: cur, bytes: 0, level: "" }]);
+      };
+      const dragFrom = { i: -1 };
+      const applyOrder = (from, to) => {
+        if (from < 0 || to < 0 || from === to) return;
+        const arr = workspaces.map((w) => ({
+          path: w.path,
+          l1: w.l1 || "",
+          l2: w.l2 || "",
+          mode: w.mode === "replace" ? "replace" : "append",
+        }));
+        const moved = arr.splice(from, 1)[0];
+        arr.splice(to, 0, moved);
+        post(API + "/state", { pathProfiles: arr }, "已调整顺序");
+      };
+      const wsRows = workspaces.length === 0
+        ? [h("div", { key: "ws-empty", style: C.dim }, "还没有工作区规则 —— 所有目录都用当前全局正文")]
+        : [
+            h("table", { key: "ws-table", style: C.table }, [
+              h("thead", null, h("tr", null, [
+                h("th", { style: C.th }, ""),
+                h("th", { style: C.th }, "工作区"),
+                h("th", { style: C.th }, "第一层注入"),
+                h("th", { style: C.th }, "第二层注入"),
+                h("th", { style: C.th }, "方式"),
+                h("th", { style: C.th }, ""),
+              ])),
+              h(
+                "tbody",
+                null,
+                workspaces.map((w, i) =>
+                  h(
+                    "tr",
+                    {
+                      key: w.path,
+                      draggable: true,
+                      onDragStart: (e) => {
+                        dragFrom.i = i;
+                        try {
+                          e.dataTransfer.effectAllowed = "move";
+                          e.dataTransfer.setData("text/plain", w.path);
+                        } catch {
+                          /* 某些浏览器禁止自定义 drag 数据，忽略即可 */
+                        }
+                      },
+                      onDragOver: (e) => e.preventDefault(),
+                      onDrop: (e) => {
+                        e.preventDefault();
+                        applyOrder(dragFrom.i, i);
+                        dragFrom.i = -1;
+                      },
+                      style: { cursor: "grab" },
+                    },
+                    [
+                      h(
+                        "td",
+                        { style: Object.assign({}, C.td, { cursor: "grab" }), title: "按住这一格拖动可以调顺序" },
+                        "⠿",
+                      ),
+                      h("td", { style: C.td, title: w.path }, [
+                        h("span", { style: C.dot(!!w.current) }),
+                        " ",
+                        h("code", { style: C.mono }, tailPath(w.path)),
+                      ]),
+                      h("td", { style: C.td }, [
+                        h(
+                          "select",
+                          { style: selCss, value: w.l1 || "", onChange: (e) => setRule(w, { l1: e.target.value }) },
+                          [h("option", { value: "", key: "__g", style: optCss }, "跟随全局（" + labelOfProfile(active) + "）")].concat(
+                            // 已有引用即使层级标记不符也保留，否则 value 不在 options 里下拉会显示空白、看起来像丢了配置
+                            optsFor(l1Profiles, w.l1).map((p) => h("option", { value: p.name, key: p.name, style: optCss }, p.name)),
+                          ),
+                        ),
+                        w.l1 && !w.l1Exists ? h("div", { style: dim11 }, "缺正文 · 回落到包裹模板") : null,
+                      ]),
+                      h("td", { style: C.td }, [
+                        h(
+                          "select",
+                          { style: selCss, value: w.l2 || "", onChange: (e) => setRule(w, { l2: e.target.value }) },
+                          [h("option", { value: "", key: "__n", style: optCss }, defaultL2 ? "（无 · 用默认 " + defaultL2 + "）" : "（无）")].concat(
+                            optsFor(l2Profiles, w.l2).map((p) => h("option", { value: p.name, key: p.name, style: optCss }, p.name)),
+                          ),
+                        ),
+                        w.l2 && !w.l2Exists ? h("div", { style: dim11 }, "缺正文 · 这一级会被跳过") : null,
+                        l2Profiles.length === 0 ? h("div", { style: dim11 }, "还没有第二层预设 → 去「第二层」页新建") : null,
+                      ]),
+                      h("td", { style: C.td }, [
+                        h(
+                          "select",
+                          {
+                            style: Object.assign({}, selCss, { width: "86px" }),
+                            value: w.mode === "replace" ? "replace" : "append",
+                            onChange: (e) => setRule(w, { mode: e.target.value }),
+                          },
+                          [h("option", { value: "append", style: optCss }, "叠加"), h("option", { value: "replace", style: optCss }, "替换")],
+                        ),
+                      ]),
+                      h("td", { style: C.td }, [
+                        smallBtn(
+                          "删除",
+                          () => post(API + "/state", { action: "path-rule-remove", path: w.path }, "已删除：" + tailPath(w.path)),
+                          !!busy,
+                        ),
+                      ]),
+                    ],
+                  ),
+                ),
+              ),
+            ]),
+          ];
+
       const sessionRows = exSessions.length
         ? exSessions.map((s) =>
             h("div", { key: s, style: { display: "flex", alignItems: "center", gap: "6px", margin: "3px 0" } }, [
@@ -804,6 +1421,10 @@ window.__ModuleLoader__.load({
                 r.id === lastSid ? h("span", { style: Object.assign({}, C.dim, { fontSize: "11px" }) }, " 当前") : null,
               ]),
               h("td", { style: C.td, title: r.cwd || "" }, r.cwd ? tailPath(r.cwd) : "-"),
+              h("td", { style: C.td }, [
+                h("span", null, "L1 " + (r.l1 || labelOfProfile(r.profile || active))),
+                r.l2 ? h("span", null, " / L2 " + r.l2 + (r.mode === "replace" ? "（替）" : "")) : h("span", { style: C.dim }, " / 无 L2"),
+              ]),
               h("td", { style: C.td }, String(r.count) + " / " + String(r.applied)),
               h("td", { style: C.td }, shortTime(r.last)),
               h("td", { style: C.td },
@@ -813,7 +1434,321 @@ window.__ModuleLoader__.load({
               ),
             ]),
           )
-        : [h("tr", { key: "none" }, h("td", { style: C.td, colSpan: 6 }, "本进程还没有装配记录（发一条消息就会出现在这里）"))];
+        : [h("tr", { key: "none" }, h("td", { style: C.td, colSpan: 7 }, "本进程还没有装配记录（发一条消息就会出现在这里）"))];
+
+      // —— 页面导航 ——
+      const tabBtn = (label, target) =>
+        h(
+          "button",
+          {
+            key: target,
+            style: Object.assign(
+              {},
+              C.btn,
+              page === target
+                ? { fontWeight: 600, boxShadow: "inset 0 -2px 0 var(--dsw-alias-brand-primary, #4a90d9)" }
+                : { opacity: 0.7 },
+            ),
+            onClick: () => goPage(target),
+          },
+          label,
+        );
+      const navRow = h("div", { style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" } }, [
+        tabBtn("概览", "home"),
+        tabBtn("第一层", "l1"),
+        tabBtn("第二层", "l2"),
+        h("span", { style: dim11 }, "生效 " + active + " · 工作区规则 " + String(workspaces.length) + " 条"),
+      ]);
+
+      // —— 操作反馈条：成功绿 / 失败红 / 进行中灰。挂在导航下面，
+      // 不用滚到页面底部才看得见——这是"点了保存没反应"的直接原因之一。
+      const msgBar = msg
+        ? h(
+            "div",
+            {
+              style: {
+                padding: "6px 10px",
+                borderRadius: "6px",
+                fontSize: "12px",
+                fontWeight: msg.startsWith("❌") ? 600 : 400,
+                color: msg.startsWith("❌") ? "#c0392b" : msg.startsWith("✅") ? "#1f8a4c" : "inherit",
+                background: msg.startsWith("❌")
+                  ? "rgba(214,80,80,.12)"
+                  : msg.startsWith("✅")
+                    ? "rgba(48,164,108,.12)"
+                    : "rgba(128,128,128,.12)",
+              },
+            },
+            msg,
+          )
+        : null;
+
+      // —— 第一层页：直接写全局正文；预设退化成可选模板 ——
+      const l1Target = l1Name || active;
+      const l1Page = [
+        h("div", { key: "l1-edit", style: C.card }, [
+          h("div", { style: { fontWeight: 600, marginBottom: "2px" } }, "第一层 · 全局提示词"),
+          h(
+            "div",
+            { style: Object.assign({}, dim11, { marginBottom: "6px" }) },
+            "所有对话共用的底稿；预设当模板用，也可以直接写一份新的。",
+          ),
+          h("div", { style: { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap", marginBottom: "6px" } }, [
+            h("span", { style: dim11 }, "编辑预设"),
+            h(
+              "select",
+              {
+                style: Object.assign({}, inputCss, { flex: "0 1 200px", minWidth: "150px" }),
+                value: l1Target,
+                onChange: (e) => loadL1(e.target.value),
+              },
+              l1Profiles.map((p) => h("option", { value: p.name, key: p.name, style: optCss }, p.name + (p.name === active ? "（生效中）" : ""))),
+            ),
+            l1Target === active
+              ? h("span", { style: dim11 }, "当前生效")
+              : smallBtn("设为全局生效", () => post(API + "/profiles", { action: "activate", name: l1Target }, "已切到 " + l1Target), !!busy),
+            smallBtn("重新读取", () => loadL1(l1Target), !!busy),
+          ]),
+          h("div", { style: { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap", marginBottom: "6px" } }, [
+            h("input", {
+              style: Object.assign({}, inputCss, { flex: "0 1 200px", minWidth: "150px" }),
+              placeholder: "新预设名（字母数字 . _ -）",
+              value: blankName,
+              onChange: (e) => setBlankName(e.target.value),
+            }),
+            smallBtn(
+              "新建空白预设",
+              async () => {
+                const nm = blankName.trim();
+                if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(nm)) {
+                  setMsg("❌ 预设名要字母或数字开头，可含 . _ -，最长 64 字符");
+                  return;
+                }
+                if (l1Profiles.some((p) => p.name === nm)) {
+                  setMsg("❌ 第一层已经有叫 " + nm + " 的预设，直接在上面下拉里选它");
+                  return;
+                }
+                const created = await post(API + "/profiles", { action: "create", name: nm, from: "", level: "l1" }, "已新建空白预设 " + nm);
+                if (!created) return;
+                setBlankName("");
+                setL1Name(nm);
+                setL1Text("");
+                setL1Loaded(nm);
+              },
+              !!busy,
+            ),
+            h("span", { style: dim11 }, "建好自动切到它，正文留空等你写"),
+          ]),
+          h("textarea", {
+            style: Object.assign({}, areaCss, { minHeight: "320px" }),
+            rows: 22,
+            value: l1Text,
+            onChange: (e) => setL1Text(e.target.value),
+          }),
+          h("div", { style: { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap", marginTop: "6px" } }, [
+            smallBtn(
+              "保存第一层正文",
+              () => {
+                if (!l1Text.trim()) {
+                  setMsg("❌ 正文是空的——先写内容，或先用上面的下拉选一个预设把正文带进来");
+                  return;
+                }
+                post(API + "/inject", { profile: l1Target, text: l1Text, level: "l1" }, "已保存 " + l1Target);
+              },
+              !!busy,
+            ),
+            h("span", { style: dim11 }, l1Text.length ? l1Text.length + " 字符 · 写向预设 " + l1Target : "正文为空 · 这一级会被跳过"),
+          ]),
+          h(
+            "div",
+            { style: Object.assign({}, dim11, { marginTop: "6px" }) },
+            "第一层审查：" +
+              (l1Target === active ? "正在全局生效" : "未生效（当前生效的是 " + active + "，点上面的「设为全局生效」切过去）") +
+              " · 被 " +
+              String(workspaces.filter((w) => w.l1 === l1Target).length) +
+              " 条工作区规则当作第一级引用",
+          ),
+          h("div", { style: { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap", marginTop: "10px" } }, [
+            h("input", {
+              style: inputCss,
+              placeholder: "新预设名（字母数字 . _ -）",
+              value: newName,
+              onChange: (e) => setNewName(e.target.value),
+            }),
+            smallBtn(
+              "把当前正文另存为新预设",
+              async () => {
+                const nm = newName.trim();
+                if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(nm)) {
+                  setMsg("❌ 先在右边输入框里填预设名：字母或数字开头，可含 . _ -，最长 64 字符");
+                  return;
+                }
+                if (!l1Text.trim()) {
+                  setMsg("❌ 正文是空的，先写内容再另存");
+                  return;
+                }
+                if (!l1Profiles.some((p) => p.name === nm)) {
+                  const created = await post(API + "/profiles", { action: "create", name: nm, from: "", level: "l1" }, "已创建预设 " + nm);
+                  if (!created) return;
+                }
+                const wrote = await post(API + "/inject", { profile: nm, text: l1Text, level: "l1" }, "已另存为 " + nm);
+                if (wrote) {
+                  setNewName("");
+                  setL1Name(nm);
+                  setL1Loaded(nm);
+                }
+              },
+              !!busy,
+            ),
+          ]),
+        ]),
+        h("div", { key: "l1-list", style: C.card }, [
+          h("div", { style: { fontWeight: 600, marginBottom: "2px" } }, "预设管理"),
+          h(
+            "div",
+            { style: Object.assign({}, dim11, { marginBottom: "6px" }) },
+            "只列第一层预设（可与第二层同名）。删掉正在生效的会回落到 default。",
+          ),
+          h("table", { style: C.table }, [
+            h("thead", null, h("tr", null, [
+              h("th", { style: C.th }, "预设"),
+              h("th", { style: C.th }, "体积"),
+              h("th", { style: C.th }, "行数"),
+              h("th", { style: C.th }, "操作"),
+            ])),
+            h("tbody", null, profileRowsFor(l1Profiles, "l1")),
+          ]),
+        ]),
+      ];
+
+      // —— 第二层页：这一层的编写与审查都在本页完成 ——
+      // —— 第二层页：只写第二层正文。这一页不认识"工作区"，目录绑定在概览页的下拉里做 ——
+      const l2Users = (name) => workspaces.filter((w) => w.l2 === name).map((w) => tailPath(w.path));
+      const l2Page = [
+        h("div", { key: "l2-write", style: C.card }, [
+          h("div", { style: { fontWeight: 600, marginBottom: "2px" } }, "第二层 · 工作区提示词（编写）"),
+          h(
+            "div",
+            { style: Object.assign({}, dim11, { marginBottom: "6px" }) },
+            "叠在第一层之后的工作区层；哪个目录用它，去概览页选。",
+          ),
+          h("div", { style: { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap", marginBottom: "6px" } }, [
+            h("span", { style: dim11 }, "编辑预设"),
+            h(
+              "select",
+              {
+                style: Object.assign({}, inputCss, { flex: "0 1 220px", minWidth: "160px" }),
+                value: l2Pick || (l2Profiles.length ? l2Profiles[0].name : ""),
+                onChange: (e) => {
+                  const v = e.target.value;
+                  setL2Pick(v);
+                  if (v) loadL2Text(v);
+                  else setL2Text("");
+                },
+              },
+              [h("option", { value: "", key: "__x", style: optCss }, l2Profiles.length ? "（选择第二层预设）" : "（还没有第二层预设，先在下面新建）")].concat(
+                optsFor(l2Profiles, l2Pick).map((p) => h("option", { value: p.name, key: p.path || p.name, style: optCss }, p.name)),
+              ),
+            ),
+            smallBtn(
+              "重新读取",
+              () => {
+                if (!l2Pick) {
+                  setMsg("❌ 先选一个第二层预设");
+                  return;
+                }
+                loadL2Text(l2Pick);
+              },
+              !!busy,
+            ),
+          ]),
+          h("div", { style: { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap", marginBottom: "6px" } }, [
+            h("input", {
+              style: Object.assign({}, inputCss, { flex: "0 1 200px", minWidth: "150px" }),
+              placeholder: "新第二层预设名（字母数字 . _ -）",
+              value: blankName,
+              onChange: (e) => setBlankName(e.target.value),
+            }),
+            smallBtn(
+              "新建空白预设",
+              async () => {
+                const nm = blankName.trim();
+                if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(nm)) {
+                  setMsg("❌ 预设名要字母或数字开头，可含 . _ -，最长 64 字符");
+                  return;
+                }
+                if (l2Profiles.some((p) => p.name === nm)) {
+                  setMsg("❌ 第二层已有叫 " + nm + " 的预设，直接在上面的下拉里选它");
+                  return;
+                }
+                const created = await post(
+                  API + "/profiles",
+                  { action: "create", name: nm, from: "", level: "l2" },
+                  "已新建第二层预设 " + nm,
+                );
+                if (!created) return;
+                setBlankName("");
+                setL2Pick(nm);
+                setL2Text("");
+              },
+              !!busy,
+            ),
+            h("span", { style: dim11 }, "建好自动切到它，正文留空等你写"),
+          ]),
+          h("textarea", {
+            style: Object.assign({}, areaCss, { minHeight: "260px" }),
+            rows: 18,
+            value: l2Text,
+            placeholder: l2Pick ? "" : "先在上面选一个第二层预设，或新建一个",
+            onChange: (e) => setL2Text(e.target.value),
+          }),
+          h("div", { style: { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap", marginTop: "6px" } }, [
+            smallBtn(
+              "保存第二层正文",
+              () => {
+                if (!l2Pick) {
+                  setMsg("❌ 先选一个第二层预设再保存");
+                  return;
+                }
+                if (!l2Text.trim()) {
+                  setMsg("❌ 正文是空的——这样这一级会被跳过；真要清空就直接删预设");
+                  return;
+                }
+                post(API + "/inject", { profile: l2Pick, text: l2Text, level: "l2" }, "已保存 " + l2Pick);
+              },
+              !!busy,
+            ),
+            h("span", { style: dim11 }, !l2Pick ? "还没选预设" : l2Text.length ? l2Text.length + " 字符 · 写向预设 " + l2Pick : "正文为空 · 这一级会被跳过"),
+          ]),
+          h(
+            "div",
+            { style: Object.assign({}, dim11, { marginTop: "6px" }) },
+            !l2Pick
+              ? "第二层审查：还没选预设"
+              : l2Users(l2Pick).length === 0
+                ? "第二层审查：目前没有任何工作区引用「" + l2Pick + "」—— 去概览页给它挂一个目录才会生效"
+                : "第二层审查：「" + l2Pick + "」被 " + String(l2Users(l2Pick).length) + " 条工作区规则引用（" + l2Users(l2Pick).join("、") + "）",
+          ),
+        ]),
+        h("div", { key: "l2-list", style: C.card }, [
+          h("div", { style: { fontWeight: 600, marginBottom: "2px" } }, "第二层预设管理"),
+          h(
+            "div",
+            { style: Object.assign({}, dim11, { marginBottom: "6px" }) },
+            "默认那份会挂到所有没单配规则的对话上；可以先建空槽位、之后再填正文。",
+          ),
+          l2Profiles.length === 0
+            ? h("div", { style: C.dim }, "还没有第二层预设 —— 上面「新建空白预设」建一个就行")
+            : h("table", { style: C.table }, [
+                h("thead", null, h("tr", null, [
+                  h("th", { style: C.th }, "预设"),
+                  h("th", { style: C.th }, "体积"),
+                  h("th", { style: C.th }, "操作"),
+                ])),
+                h("tbody", null, profileRowsFor(l2Profiles, "l2")),
+              ]),
+        ]),
+      ];
 
       return h("div", { style: { display: "flex", flexDirection: "column", gap: "4px", padding: "2px 0" } }, [
         // 状态摘要
@@ -837,55 +1772,80 @@ window.__ModuleLoader__.load({
             h("code", { style: C.mono, title: lastCwd || "" }, lastCwd ? tailPath(lastCwd) : "（本进程还没装配过）"),
           ),
           line("状态文件", h("code", { style: C.mono }, gov.stateFile || "-")),
+          line(
+            "两级注入",
+            h(
+              "span",
+              null,
+              "第一级 " + labelOfProfile(active) + " · 第二级 " + String(workspaces.length) + " 条目录规则" +
+                (defaultL2 ? " · 默认 " + defaultL2 : "") +
+                (l2Profiles.length ? "" : " · 还没有第二层预设"),
+            ),
+          ),
         ]),
+        navRow,
+        msgBar,
 
-        // 版本管理
+        ...(page === "home" ? [
+        // 工作区规则：一行 = 工作区 + 第一级预设 + 第二级预设，两级都只选不写；正文在「第一层」「第二层」页写
         h("div", { style: C.card }, [
-          h("div", { style: { fontWeight: 600, marginBottom: "2px" } }, "注入版本"),
+          h(
+            "div",
+            {
+              style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", userSelect: "none" },
+              onClick: () => setWsOpen(!wsOpen),
+            },
+            [
+              h("span", { style: { fontWeight: 600 } }, "两级注入规则（按工作目录）"),
+              h(
+                "span",
+                { style: Object.assign({}, C.dim, { fontSize: "11px" }) },
+                String(workspaces.length) + " 条 · " + (wsOpen ? "点击折叠" : "点击展开"),
+              ),
+              h("span", { style: { marginLeft: "auto", fontSize: "12px" } }, wsOpen ? "▾" : "▸"),
+            ],
+          ),
           h(
             "div",
             { style: Object.assign({}, C.dim, { fontSize: "11px", marginBottom: "6px" }) },
-            "default = 用户覆盖文件（可在插件页编辑正文）；其余版本存放在版本目录，切过去立即生效。",
+            "第一级＝这个目录用的全局正文（留空跟随全局），第二级＝叠加/替换它的工作区层；这里只选预设，正文到「第一层」「第二层」页写。",
           ),
-          h("table", { style: C.table }, [
-            h("thead", null, h("tr", null, [
-              h("th", { style: C.th }, "版本"),
-              h("th", { style: C.th }, "体积"),
-              h("th", { style: C.th }, "行数"),
-              h("th", { style: C.th }, "操作"),
-            ])),
-            h("tbody", null, profileRows),
-          ]),
-          h("div", { style: Object.assign({}, C.row, { marginTop: "8px" }) }, [
-            h("input", {
-              style: {
-                flex: "1 1 140px",
-                minWidth: "120px",
-                height: "24px",
-                padding: "0 8px",
-                fontSize: "12px",
-                borderRadius: "6px",
-                border: "1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.35))",
-                background: "transparent",
-                color: "inherit",
-              },
-              placeholder: "新版本名（字母数字 . _ -）",
-              value: newName,
-              onChange: (e) => setNewName(e.target.value),
-            }),
-            h(
-              "button",
-              {
-                style: btnStyle(!!busy),
-                disabled: !!busy || !newName.trim(),
-                onClick: async () => {
-                  const r = await post(API + "/profiles", { action: "create", name: newName.trim(), from: active }, "已创建 " + newName.trim());
-                  if (r) setNewName("");
-                },
-              },
-              "从当前版本复制",
-            ),
-          ]),
+          ...(wsOpen
+            ? [
+                ...wsRows,
+                h("div", { style: { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap", marginTop: "10px" } }, [
+                  h("input", {
+                    style: inputCss,
+                    placeholder: "工作目录，如 E:/dsh测试",
+                    value: wpPath,
+                    onChange: (e) => setWpPath(e.target.value),
+                  }),
+                  h(
+                    "select",
+                    { style: selCss, value: wpL1, onChange: (e) => setWpL1(e.target.value) },
+                    [h("option", { value: "", key: "__g", style: optCss }, "第一级：跟随全局（" + labelOfProfile(active) + "）")].concat(
+                      l1Profiles.map((x) => h("option", { value: x.name, key: x.name, style: optCss }, "第一级：" + x.name)),
+                    ),
+                  ),
+                  h(
+                    "select",
+                    { style: selCss, value: wpL2, onChange: (e) => setWpL2(e.target.value) },
+                    [h("option", { value: "", key: "__n", style: optCss }, defaultL2 ? "第二级：（用默认 " + defaultL2 + "）" : "第二级：（无）")].concat(
+                      l2Profiles.map((x) => h("option", { value: x.name, key: x.name, style: optCss }, "第二级：" + x.name)),
+                    ),
+                  ),
+                  h(
+                    "select",
+                    { style: Object.assign({}, selCss, { minWidth: "86px" }), value: wpMode, onChange: (e) => setWpMode(e.target.value) },
+                    [h("option", { value: "append", style: optCss }, "叠加"), h("option", { value: "replace", style: optCss }, "替换")],
+                  ),
+                  smallBtn("添加", addRule, !!busy || !wpPath.trim()),
+                  l2Profiles.length === 0
+                    ? h("span", { style: Object.assign({}, C.dim, { fontSize: "11px" }) }, "（第二级预设去「第二层」页新建）")
+                    : null,
+                ]),
+              ]
+            : []),
         ]),
 
         // 生效范围：默认全部注入，只维护「不注入」的名单
@@ -894,7 +1854,7 @@ window.__ModuleLoader__.load({
           h(
             "div",
             { style: Object.assign({}, C.dim, { fontSize: "11px", marginBottom: "6px" }) },
-            "注入在每轮请求上重新装配，旧对话同样生效 —— 不需要另开新对话，也不需要换干净工作区。这里只维护「不注入」的地方：学术/写作类工作区排除掉就完全走原生行为。目录排除对该目录下所有会话（含以后新开的）生效，是主用旋钮；会话排除只影响单个对话。",
+            "这里只维护「不注入」的地方——目录排除对目录下所有会话（含以后新开的）生效。",
           ),
           h("div", { style: C.row }, [
             smallBtn(
@@ -946,7 +1906,7 @@ window.__ModuleLoader__.load({
           h(
             "div",
             { style: Object.assign({}, C.dim, { fontSize: "11px", marginBottom: "6px" }) },
-            "会话 id 每开一个新对话就会变，所以优先用上面的目录排除。这里适合临时让「这一个对话」不注入。",
+            "只影响单个对话；新对话 id 会变，日常用上面的目录排除。",
           ),
           ...sessionRows,
           h("div", { style: Object.assign({}, C.row, { marginTop: "6px" }) }, [
@@ -982,6 +1942,7 @@ window.__ModuleLoader__.load({
               h("thead", null, h("tr", null, [
                 h("th", { style: C.th }, "会话 id"),
                 h("th", { style: C.th }, "工作目录"),
+                h("th", { style: C.th }, "生效层级"),
                 h("th", { style: C.th }, "装配/注入"),
                 h("th", { style: C.th }, "最近"),
                 h("th", { style: C.th }, "操作"),
@@ -991,7 +1952,9 @@ window.__ModuleLoader__.load({
           ]),
         ]),
 
-        msg ? h("div", { style: Object.assign({}, C.dim, { fontSize: "12px", padding: "0 2px" }) }, msg) : null,
+        ] : []),
+        ...(page === "l1" ? l1Page : []),
+        ...(page === "l2" ? l2Page : []),
       ]);
     }
 
@@ -1002,7 +1965,7 @@ window.__ModuleLoader__.load({
         h(
           "div",
           { style: { fontSize: "12px", color: "var(--dsw-alias-label-tertiary, #888)" } },
-          "默认对所有工作区注入。学术/写作类工作区建议加进「排除目录」，那里的会话就完全走原生行为（引用、公式、长文写作更稳）。",
+          "默认对所有工作区注入。只对需要原生提示词的工作区做排除。",
         ),
         renderSlot ? renderSlot("settings.frame.item", {}) : h(FrameGovernance, null),
       ]);

@@ -41,7 +41,7 @@ if not exist "%DST%" mkdir "%DST%"
 if errorlevel 1 goto :mkdirfail
 
 echo [1/3] copying files ...
-robocopy "%SRC%." "%DST%" /E /NFL /NDL /NJH /NJS /XD .git node_modules /XF install.log uninstall.log _test*.mjs _smoke*.mjs >> "%LOGF%" 2>&1
+robocopy "%SRC%." "%DST%" /E /NFL /NDL /NJH /NJS /XD .git node_modules tests /XF install.log uninstall.log _test*.mjs _smoke*.mjs >> "%LOGF%" 2>&1
 if errorlevel 8 goto :copyfail
 echo       ok
 

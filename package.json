@@ -1,7 +1,7 @@
 {
   "name": "dsh-prompt-frame",
-  "version": "0.1.0",
-  "description": "Lightweight context management for AI agents: layered prompt injection gives every DSH workspace its own identity, rules and persistent memory",
+  "version": "1.0.0",
+  "description": "Two-level prompt injection for DeepSeek Harness: every workspace gets its own identity, rules and standing memory",
   "type": "module",
   "license": "MIT",
   "author": "zuah501",
