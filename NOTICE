@@ -51,10 +51,4 @@ Files copied verbatim from dsh-purge v1.1.77 (lib/ of the upstream package):
                                             third-party material. It is a blank
                                             template written for this release.
 
-Why vendor instead of depending on dsh-purge: the earlier experimental plugin
-imported dsh-purge/lib/identity.js by absolute path, so uninstalling dsh-purge
-broke it. Vendoring the three files removes that dependency; nothing here reads
-dsh-purge at runtime.
-
 Apache License 2.0 full text: http://www.apache.org/licenses/LICENSE-2.0
-Upstream repository:          https://github.com/YuJunZhiXue/dsh-purge

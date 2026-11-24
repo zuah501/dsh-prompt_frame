@@ -1886,7 +1886,7 @@ window.__ModuleLoader__.load({
                 background: "transparent",
                 color: "inherit",
               },
-              placeholder: "工作目录，如 E:\\dsh-aggent-deepseekv4flash",
+              placeholder: "工作目录，如 D:\\projects\\demo",
               value: pathInput,
               onChange: (e) => setPathInput(e.target.value),
             }),

@@ -1,6 +1,6 @@
-# dsh-prompt-frame
+# Prompt Frame
 
-A lightweight context-management plugin for DeepSeek Harness. Two-level prompt injection gives every workspace its own identity, rules, and standing memory.
+**Context configuration and workspace isolation for AI agents.** `dsh-prompt-frame` is a lightweight plugin for [DeepSeek Harness](https://deepseek.com) (DSH): two levels of plain-Markdown context, resolved per working directory, so every workspace runs with its own identity, rules and persistent workspace context.
 
 [English](#english) · [中文](#中文)
 
@@ -8,7 +8,7 @@ A lightweight context-management plugin for DeepSeek Harness. Two-level prompt i
 
 ## English
 
-`dsh-prompt-frame` is a bundle plugin for [DeepSeek Harness](https://deepseek.com) (DSH). It takes over the system-prompt assembly step and injects the body that belongs to the *current working directory*, instead of letting every workspace share one generic identity.
+It is a bundle plugin: it hooks the system-prompt assembly step and places the body that belongs to the *current working directory* at the top of the assembly, instead of letting every workspace share one generic identity.
 
 - **Two-level injection** — a global body for every conversation, plus a workspace body that can be appended on top of it or take over entirely.
 - **Directory rules** — matched by longest path prefix, so one rule can cover a whole tree and narrower rules refine it.
@@ -109,9 +109,9 @@ The badge is clickable, but **clicking opens a popover and changes nothing by it
 
 The badge lights up **before the first turn** too. Assembly records live in memory and are empty after a restart, so the console falls back to the workspace root the host handed the plugin at startup and computes a preview (marked as such in the tooltip). The preview is display-only; the real decision still happens in every assembly.
 
-### Memory
+### Persistent workspace context
 
-The plugin stores no memory itself — it only makes sure your memory is **in the context every turn**.
+The plugin stores no memory and ships no memory backend — it only guarantees that **what you keep in files is in the context every turn**.
 
 The convention is to keep what must survive a session in files: the workspace's `AGENTS.md`, `STATE.md`, or `~/.dsh/prompt-inject.md`. Those files are re-read every turn (cached by mtime + size), so editing a file changes the next turn's behaviour without a restart.
 
@@ -134,7 +134,7 @@ cp -r dsh-prompt-frame "$USERPROFILE/.dsh/profiles/desktop/node_modules/"
 # then add "dsh-prompt-frame" to dsh.profile.bundles in <profile>/package.json
 ```
 
-**Option 3 — npm.**
+**Option 3 — npm** (only once the package is published; not on the registry yet).
 
 ```bash
 cd ~/.dsh/profiles/desktop
@@ -146,10 +146,10 @@ pnpm add dsh-prompt-frame
 Start the app, send one message, then check `~/.dsh/dsh-prompt-frame.log`:
 
 ```json
-{"applied":true,"segments":3,"bytes":1204,"ms":1.7}
+{"t":"<time>","ev":"assemble","inSections":18,"inHead":"harness:identity","applied":true,"injectSource":"file","profile":"default","workspaceL1":"","workspaceL2":"","workspaceMode":"append","sessionId":"<session-id>","sessionCwd":"D:\\demo","injectBytes":1204,"stages":2,"outSections":18,"outHead":"dsh-purge","dropped":["harness:identity"],"outBytes":30112,"ms":1.7}
 ```
 
-`"applied":true` means it is working.
+One example line — the numbers vary by workspace. `"applied":true` means the body was injected; `"dropped":["harness:identity"]` shows the only host section removed.
 
 ### Configuration
 
@@ -261,15 +261,15 @@ All four are self-contained: they build state and presets in a system temp direc
 
 MIT for the plugin itself — see `LICENSE`.
 
-Files under `vendor/` are derived from [YuJunZhiXue/dsh-purge](https://github.com/YuJunZhiXue/dsh-purge) v1.1.77 (Apache-2.0); the file list and their modifications are in `NOTICE`.
+Files under `vendor/` carry a third-party Apache-2.0 attribution; see `NOTICE` for the file list and the local modifications.
 
 ---
 
 ## 中文
 
-**轻量化的 AI Agent 上下文管理插件。** 两级提示词注入，让每个工作区都有自己的身份定位、规则约束和持续记忆。
+**面向 DSH 的轻量化上下文配置插件**，通过全局规则、工作区配置和持久化文本预设，实现不同工作环境的上下文隔离与管理。
 
-`dsh-prompt-frame` 是 [DeepSeek Harness](https://deepseek.com)（DSH）的 bundle 插件。它在 system prompt 装配阶段接管整段结果，注入**属于当前工作目录**的那一份，而不是让所有工作区共用一套身份和规则。
+`dsh-prompt-frame` 是 [DeepSeek Harness](https://deepseek.com)（DSH）的 bundle 插件。它把一份通用 system prompt 变成按工作区配置的上下文：挂在装配环节，把**属于当前工作目录**的那一份放到最前面，而不是让所有工作区共用一套身份和规则。
 
 - **两级注入** —— 一段全局正文给所有对话，一段工作区正文按目录叠加在它后面，或者直接顶替它。
 - **目录规则** —— 最长路径前缀优先，一条规则覆盖整棵树，更长的路径再收紧局部。
@@ -370,9 +370,9 @@ Files under `vendor/` are derived from [YuJunZhiXue/dsh-purge](https://github.co
 
 灯在**还没跑过一轮对话**时也会亮：装配记录在内存里，重启后为空，这时控制台退回插件启动时宿主给的工作区根先算一次预判（悬停里注明"预判"）。预判只是显示，真正的判定仍在每轮装配里。
 
-### 持续记忆
+### 持久化的工作区上下文
 
-插件本身不存记忆——它只负责**每轮都把记忆带进上下文**。
+插件不存记忆，也没有记忆后端——它只保证**你写在文件里的东西，每轮都在上下文里**。
 
 约定是把跨会话要延续的东西写进文件：工作区的 `AGENTS.md`、`STATE.md`、或 `~/.dsh/prompt-inject.md`。这些文件每轮重读（按 mtime + size 缓存，改了自动失效），所以改文件 = 改下一轮的行为，不用重启。
 
@@ -384,15 +384,15 @@ Files under `vendor/` are derived from [YuJunZhiXue/dsh-purge](https://github.co
 
 **方式二 · 手动**：`cp -r dsh-prompt-frame "$USERPROFILE/.dsh/profiles/desktop/node_modules/"`，再在 `<profile>/package.json` 的 `dsh.profile.bundles` 里加一行 `"dsh-prompt-frame"`。
 
-**方式三 · npm**：`cd ~/.dsh/profiles/desktop && pnpm add dsh-prompt-frame`。`@deepseek-ai/schemastery` 已声明为 `peerDependencies`（宿主 profile 本就带一份，公共 registry 上也有 3.x），pnpm 会自动解析；若目标 profile 根没有它，先 `pnpm add @deepseek-ai/schemastery`。
+**方式三 · npm**（要等包发布到 npm；目前还没发）：`cd ~/.dsh/profiles/desktop && pnpm add dsh-prompt-frame`。`@deepseek-ai/schemastery` 已声明为 `peerDependencies`（宿主 profile 本就带一份，公共 registry 上也有 3.x），pnpm 会自动解析；若目标 profile 根没有它，先 `pnpm add @deepseek-ai/schemastery`。
 
 装完启动桌面端，随便聊一轮，看 `~/.dsh/dsh-prompt-frame.log`：
 
 ```json
-{"applied":true,"segments":3,"bytes":1204,"ms":1.7}
+{"t":"<time>","ev":"assemble","inSections":18,"inHead":"harness:identity","applied":true,"injectSource":"file","profile":"default","workspaceL1":"","workspaceL2":"","workspaceMode":"append","sessionId":"<session-id>","sessionCwd":"D:\\demo","injectBytes":1204,"stages":2,"outSections":18,"outHead":"dsh-purge","dropped":["harness:identity"],"outBytes":30112,"ms":1.7}
 ```
 
-出现 `"applied":true` 就成了。
+这是示例一行，数值随工作区变化。`"applied":true` 表示正文已注入；`"dropped":["harness:identity"]` 表示只去掉了宿主身份段。
 
 ### 配置
 

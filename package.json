@@ -1,7 +1,7 @@
 {
   "name": "dsh-prompt-frame",
   "version": "1.0.0",
-  "description": "Two-level prompt injection for DeepSeek Harness: every workspace gets its own identity, rules and standing memory",
+  "description": "Context configuration and workspace isolation for DeepSeek Harness: two levels of plain-Markdown context, resolved per working directory",
   "type": "module",
   "license": "MIT",
   "author": "zuah501",
@@ -54,9 +54,9 @@
     "dsh-plugin",
     "deepseek-harness",
     "context-management",
-    "prompt-injection",
+    "context-configuration",
     "workspace-isolation",
-    "agent-memory",
+    "persistent-workspace-context",
     "ai-agent"
   ]
 }
